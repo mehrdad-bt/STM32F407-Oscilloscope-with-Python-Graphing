@@ -1,0 +1,165 @@
+import serial
+import matplotlib.pyplot as plt
+import matplotlib.widgets as widgets
+import numpy as np
+from collections import deque
+
+# Constants for ADC scaling
+ADC_REF_VOLTAGE = 3.3  # Reference voltage of the STM32F407 ADC
+ADC_MAX_VALUE = 4095    # Maximum value for a 12-bit ADC
+
+# Serial port configuration
+try:
+    ser = serial.Serial('COM4', 115200, timeout=0)  # Non-blocking mode
+    ser.flush()
+    print("Serial port opened successfully!")
+except serial.SerialException as e:
+    print(f"Error opening serial port: {e}")
+    exit(1)
+
+# Initialize plot
+plt.ion()
+fig, ax = plt.subplots()
+plt.subplots_adjust(bottom=0.4)  # Adjust bottom margin to fit buttons
+
+# Data buffer
+buffer_size = 2048  # Increased buffer size
+sampling_rate = 100000  # Sampling rate in Hz (adjust based on your setup)
+x = np.arange(0, buffer_size)
+y = deque(np.zeros(buffer_size), maxlen=buffer_size)  # Store voltage values
+line, = ax.plot(x, y)
+
+# Set y-axis label to indicate voltage
+ax.set_ylabel("Voltage (V)")
+ax.set_xlabel("Samples")
+
+# Add text annotation for frequency
+freq_text = ax.text(0.02, 0.95, "", transform=ax.transAxes, fontsize=12, color="red")
+
+# Add buttons for scaling and pause
+ax_volt_inc = plt.axes([0.2, 0.25, 0.1, 0.05])  # Increase div/volt button position
+ax_volt_dec = plt.axes([0.2, 0.15, 0.1, 0.05])  # Decrease div/volt button position
+ax_time_inc = plt.axes([0.5, 0.25, 0.1, 0.05])  # Increase div/sec button position
+ax_time_dec = plt.axes([0.5, 0.15, 0.1, 0.05])  # Decrease div/sec button position
+ax_auto = plt.axes([0.7, 0.25, 0.1, 0.05])      # Auto Set button position
+ax_pause = plt.axes([0.7, 0.15, 0.1, 0.05])     # Pause button position
+
+button_volt_inc = widgets.Button(ax_volt_inc, 'Increase div/volt')
+button_volt_dec = widgets.Button(ax_volt_dec, 'Decrease div/volt')
+button_time_inc = widgets.Button(ax_time_inc, 'Increase div/sec')
+button_time_dec = widgets.Button(ax_time_dec, 'Decrease div/sec')
+button_auto = widgets.Button(ax_auto, 'Auto Set')
+button_pause = widgets.Button(ax_pause, 'Pause')
+
+# Scaling factors
+volt_scale = 1.0
+time_scale = 1.0
+
+# Pause state
+paused = False
+
+# Button event handlers
+def increase_volt(event):
+    global volt_scale
+    volt_scale *= 2
+    ax.set_ylim(-ADC_REF_VOLTAGE * volt_scale, ADC_REF_VOLTAGE * volt_scale)  # Adjust y-axis limits
+    plt.draw()
+
+def decrease_volt(event):
+    global volt_scale
+    volt_scale /= 2
+    ax.set_ylim(-ADC_REF_VOLTAGE * volt_scale, ADC_REF_VOLTAGE * volt_scale)  # Adjust y-axis limits
+    plt.draw()
+
+def increase_time(event):
+    global time_scale
+    time_scale *= 2
+    ax.set_xlim(0, buffer_size * time_scale)  # Adjust x-axis limits
+    plt.draw()
+
+def decrease_time(event):
+    global time_scale
+    time_scale /= 2
+    ax.set_xlim(0, buffer_size * time_scale)  # Adjust x-axis limits
+    plt.draw()
+
+def auto_set(event):
+    global volt_scale, time_scale
+    # Calculate min and max values of the signal
+    y_min = np.min(y)
+    y_max = np.max(y)
+    # Calculate the peak-to-peak amplitude
+    amplitude = y_max - y_min
+    # Add 20% padding
+    padding = amplitude * 0.2
+    # Adjust vertical scaling
+    ax.set_ylim(y_min - padding, y_max + padding)
+    # Adjust horizontal scaling to show the entire buffer
+    ax.set_xlim(0, buffer_size)
+    plt.draw()
+
+def toggle_pause(event):
+    global paused
+    paused = not paused
+    if paused:
+        button_pause.label.set_text("Resume")
+    else:
+        button_pause.label.set_text("Pause")
+    plt.draw()
+
+# Function to calculate signal frequency using FFT
+def calculate_frequency(signal, sampling_rate):
+    n = len(signal)
+    # Remove DC offset
+    signal = signal - np.mean(signal)
+    # Apply FFT
+    fft_result = np.fft.fft(signal)
+    fft_magnitude = np.abs(fft_result)
+    frequencies = np.fft.fftfreq(n, d=1/sampling_rate)
+    # Find the dominant frequency (ignore negative frequencies)
+    positive_freq_idx = np.argmax(fft_magnitude[:n//2])
+    dominant_freq = frequencies[positive_freq_idx]
+    return abs(dominant_freq)
+
+# Attach event handlers to buttons
+button_volt_inc.on_clicked(increase_volt)
+button_volt_dec.on_clicked(decrease_volt)
+button_time_inc.on_clicked(increase_time)
+button_time_dec.on_clicked(decrease_time)
+button_auto.on_clicked(auto_set)
+button_pause.on_clicked(toggle_pause)
+
+# Main loop to update plot
+try:
+    while True:
+        if not paused:
+            # Read all available data from the serial port
+            data = ser.read(ser.in_waiting or 1)
+            if data:
+                try:
+                    # Decode the data and split into lines
+                    decoded_data = data.decode('utf-8')
+                    lines = decoded_data.splitlines()
+                    for line_data in lines:
+                        # Process each line (assuming one ADC value per line)
+                        try:
+                            adc_value = int(line_data.strip())  # Convert to integer
+                            voltage = (adc_value * ADC_REF_VOLTAGE) / ADC_MAX_VALUE  # Convert to voltage
+                            y.append(voltage)  # Update the buffer with voltage values
+                        except ValueError:
+                            print("Invalid data received")
+                    # Update the plot
+                    line.set_ydata(y)
+                    ax.relim()
+                    ax.autoscale_view()
+                    # Calculate and display frequency
+                    frequency = calculate_frequency(np.array(y), sampling_rate)
+                    freq_text.set_text(f"Frequency: {frequency:.2f} Hz")
+                    fig.canvas.flush_events()
+                except UnicodeDecodeError:
+                    print("Error decoding data")
+        plt.pause(0.01)  # Small delay to prevent high CPU usage
+except KeyboardInterrupt:
+    print("Exiting...")
+finally:
+    ser.close()
